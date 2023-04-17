@@ -26,7 +26,7 @@ from delta.tables import DeltaTable
 # MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/EHRPatientReport/eHROutputError
 # MAGIC 
 # MAGIC 
-# MAGIC ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/
+# MAGIC ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/EHRPatientReport/
 
 # COMMAND ----------
 
@@ -43,7 +43,96 @@ def table_exists(DATABASE, table_name):
 
 # COMMAND ----------
 
-LOAD_PATH = pathlib.Path('/dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/EHRPatientReport/')
+today = datetime.datetime.now().astimezone(tz=datetime.timezone.utc).strftime('%Y-%m-%d')
+
+CHANGES_LOAD_PATH = '/dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta'
+
+BASE_PATH = pathlib.Path(CHANGES_LOAD_PATH)
+processing = pathlib.Path(BASE_PATH / 'processing')
+processed = pathlib.Path(BASE_PATH / 'processed' / today)
+
+processing.mkdir(parents=True, exist_ok=True)
+processed.mkdir(parents=True, exist_ok=True)
+
+
+def move_files(src, dst):
+    # `dir` will be each collection name
+    for dir in src.iterdir():
+        # `files` will be changes parquet file in each collection
+        p = dst / dir.name
+        p.mkdir(parents=True, exist_ok=True)
+        for file in dir.iterdir():
+            print(f'Moving {file!r} to {p!r}')
+            shutil.move(str(file), str(p))
+
+            
+def prepare_files_for_processing(BASE_PATH, processing):
+    for dir in [(BASE_PATH / 'EHRPatientReport')]:
+        if not dir.exists(): # remove this after test
+            continue
+        print(f'Moving {dir!r} to {processing!r}')
+        # anyway, moving directory seems to take the same amount of time
+        # maybe it would be better to move each file ourselves. We can have more control over the copy maybe
+        try:
+            shutil.move(str(dir), str(processing))
+        except OSError as e:
+            # likely due to some databricks symlinking files issue ? make sure
+            print('error', e)
+            # try moving files instead of directories
+            move_files(dir, processing / dir.name)
+
+            
+prepare_files_for_processing(BASE_PATH, processing)
+
+
+def move_and_clear_processed_data(processing, processed):
+    for dir in processing.iterdir():
+        print(f'Moving {dir!r} to {processed!r}')
+        try:
+            shutil.move(str(dir), str(processed))
+        except shutil.Error as e:
+            print('error clearing', e)
+            # dir exists, try moving each files instead
+            move_files(dir, processed / dir.name)
+            
+            
+
+LOAD_PATH = processing / 'EHRPatientReport'
+
+# COMMAND ----------
+
+#move_and_clear_processed_data(processing, processed) # clean up
+
+# COMMAND ----------
+
+processed
+# list(processing.iterdir())
+
+# COMMAND ----------
+
+# MAGIC %sh
+# MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/
+# MAGIC 
+# MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/
+# MAGIC 
+# MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processed/2023-04-17/EHRPatientReport/ehrpatientreport | wc -l
+# MAGIC 
+# MAGIC 
+# MAGIC ls -la /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processing/EHRPatientReport/*
+
+# COMMAND ----------
+
+# LOAD_PATH = pathlib.Path('/dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processing/EHRPatientReport/')
+
+LOAD_PATH = processing / 'EHRPatientReport'
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC -- DATABASE = 'qa_mongo_ehrone_prime_bronze_EHRPatientReport'
+# MAGIC -- table_name = 'ehrpatientreport'
+# MAGIC 
+# MAGIC select * from qa_mongo_ehrone_prime_bronze_EHRPatientReport.ehrpatientreport order by uploadTime desc limit 1;
 
 # COMMAND ----------
 
@@ -53,8 +142,6 @@ LOAD_PATH = pathlib.Path('/dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/e
 # COMMAND ----------
 
 ehrpatientreport_schema = 'STRUCT<_class: STRING, _id: STRING, completedDate: STRUCT<`$date`: BIGINT>, ehr: STRING, fromDate: STRUCT<`$date`: BIGINT>, location: STRING, message: STRING, npi: STRING, numOfRetries: BIGINT, orginalReportId: STRING, patients: ARRAY<STRUCT<_id: STRING, numOfRetries: BIGINT, status: STRING>>, physician: STRING, practice: STRING, priority: STRING, sentToRPATime: STRUCT<`$date`: BIGINT>, singleThreaded: BOOLEAN, status: STRING, study: STRING, toDate: STRUCT<`$date`: BIGINT>, type: STRING, uploadTime: STRUCT<`$date`: BIGINT>>'
-
-df = spark.read.parquet('/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/EHRPatientReport/ehrpatientreport/LOAD*')
 
 
 def initial_load_ehrpatientreport(DATABASE, table_name, delta_path):
@@ -106,9 +193,9 @@ ehrpatientreport_schema = 'STRUCT<_class: STRING, _id: STRING, completedDate: ST
 
 def incremental_load_ehrpatientreport(DATABASE, table_name):
     path = LOAD_PATH / table_name
-    print('ehrpatientreport path', path)
-    
     incremental_files = [str(pathlib.Path('/') / p.relative_to('/dbfs')) for p in path.glob('*.parquet') if not p.name.startswith('LOAD')]
+    
+    print('ehrpatientreport path', path, len(incremental_files))
     if len(incremental_files) == 0:
         return None # no incremental files found
     primary_key = '_id'
@@ -178,6 +265,24 @@ incremental_load_ehrpatientreport(DATABASE, table_name)
 
 # COMMAND ----------
 
+# MAGIC %sh
+# MAGIC ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processing/EHRPatientReport/ehrpatientreport/
+# MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processing/uploadedpatientreport
+# MAGIC ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processing/EHRPatientReport/uploadedpatientreport
+
+# COMMAND ----------
+
+# MAGIC %sh
+# MAGIC ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processing/
+# MAGIC mv /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processing/uploadedpatientreport/ /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processing/EHRPatientReport/
+
+# COMMAND ----------
+
+# MAGIC %sh
+# MAGIC ls -la /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processing/
+
+# COMMAND ----------
+
 # MAGIC %md
 # MAGIC #Initial uploadedpatientreport
 
@@ -232,9 +337,9 @@ initial_load_uploadedpatientreport(DATABASE, table_name, delta_path)
 
 def incremental_load_uploadedpatientreport(DATABASE, table_name):
     path = LOAD_PATH / table_name
-    print('uploadedpatientreport path', path)
-    
     incremental_files = [str(pathlib.Path('/') / p.relative_to('/dbfs')) for p in path.glob('*.parquet') if not p.name.startswith('LOAD')]
+    
+    print('uploadedpatientreport path', path, len(incremental_files))
     if len(incremental_files) == 0:
         return None # no incremental files found
     
@@ -510,6 +615,14 @@ table_name = 'eHROutputError'
 delta_path = f'/delta/qa-dms-cdc-{DATABASE}/{table_name}'
 
 incremental_load_eHROutputError(DATABASE, table_name) # the initial and incremental load seems to have different structures. What to do ?
+
+# COMMAND ----------
+
+move_and_clear_processed_data(processing, processed)
+
+# COMMAND ----------
+
+1/0
 
 # COMMAND ----------
 
