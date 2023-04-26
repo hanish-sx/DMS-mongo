@@ -1,4 +1,5 @@
 # Databricks notebook source
+import os
 import pathlib
 import datetime
 import shutil
@@ -10,7 +11,7 @@ from delta.tables import DeltaTable
 
 # MAGIC %sql
 # MAGIC -- drop database qa_mongo_ehrone_prime_bronze_EHRPatientReport CASCADE;
-# MAGIC CREATE DATABASE IF NOT EXISTS qa_mongo_ehrone_prime_bronze_EHRPatientReport;
+# MAGIC -- CREATE DATABASE IF NOT EXISTS qa_mongo_ehrone_prime_bronze_EHRPatientReport;
 
 # COMMAND ----------
 
@@ -30,9 +31,14 @@ from delta.tables import DeltaTable
 
 # COMMAND ----------
 
-df = spark.read.parquet('/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/EHRPatientReport/eHROutputError/LOAD*')
-display(df)
-df.printSchema()
+# df = spark.read.parquet('/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/EHRPatientReport/eHROutputError/LOAD*')
+# display(df)
+# df.printSchema()
+
+# COMMAND ----------
+
+# MAGIC %sh
+# MAGIC ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/
 
 # COMMAND ----------
 
@@ -81,9 +87,6 @@ def prepare_files_for_processing(BASE_PATH, processing):
             # try moving files instead of directories
             move_files(dir, processing / dir.name)
 
-            
-prepare_files_for_processing(BASE_PATH, processing)
-
 
 def move_and_clear_processed_data(processing, processed):
     for dir in processing.iterdir():
@@ -94,31 +97,20 @@ def move_and_clear_processed_data(processing, processed):
             print('error clearing', e)
             # dir exists, try moving each files instead
             move_files(dir, processed / dir.name)
-            
-            
 
-LOAD_PATH = processing / 'EHRPatientReport'
 
-# COMMAND ----------
-
-#move_and_clear_processed_data(processing, processed) # clean up
-
-# COMMAND ----------
-
-processed
-# list(processing.iterdir())
+prepare_files_for_processing(BASE_PATH, processing)
 
 # COMMAND ----------
 
 # MAGIC %sh
 # MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/
-# MAGIC 
 # MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/
-# MAGIC 
 # MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processed/2023-04-17/EHRPatientReport/ehrpatientreport | wc -l
+# MAGIC # ls -la /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processing/EHRPatientReport/*
 # MAGIC 
 # MAGIC 
-# MAGIC ls -la /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processing/EHRPatientReport/*
+# MAGIC ls -la /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/
 
 # COMMAND ----------
 
@@ -126,13 +118,16 @@ processed
 
 LOAD_PATH = processing / 'EHRPatientReport'
 
+DATABASE = 'raw'
+
+DELTA_BASE = f'/delta/prod-mongo-dms-EHRPatientReport-{DATABASE}/'
+
+LOAD_PATH, DELTA_BASE
+
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC -- DATABASE = 'qa_mongo_ehrone_prime_bronze_EHRPatientReport'
-# MAGIC -- table_name = 'ehrpatientreport'
-# MAGIC 
-# MAGIC select * from qa_mongo_ehrone_prime_bronze_EHRPatientReport.ehrpatientreport order by uploadTime desc limit 1;
+# MAGIC select * from raw.ehrpatientreport order by uploadTime desc limit 1;
 
 # COMMAND ----------
 
@@ -145,7 +140,9 @@ ehrpatientreport_schema = 'STRUCT<_class: STRING, _id: STRING, completedDate: ST
 
 
 def initial_load_ehrpatientreport(DATABASE, table_name, delta_path):
-    path = LOAD_PATH / table_name
+    # strip the suffix `_ehrprime` from the table name
+    # because we are using the table name to find the parquet files.
+    path = LOAD_PATH / table_name[:-len('_ehrprime')]
     print('ehrpatientreport path', path)
     # create table if not exists
     if table_exists(DATABASE, table_name):
@@ -154,14 +151,16 @@ def initial_load_ehrpatientreport(DATABASE, table_name, delta_path):
     # since we are using same path for full load and incremental load
     # we will use `LOAD` to distingush between the two for now
     # we'll get the first `LOAD*.parquet` file, and there should only be one
-    full_load_file = str( next((pathlib.Path('/') / path.relative_to('/dbfs')).glob('LOAD*.parquet'), '') )
+    full_load_file = next(path.glob('LOAD*.parquet'), '')
     if not full_load_file:
+        print(f'{full_load_file!r} is not found')
         return None # no initial file, which would be weird and never happen for our workflow
-    
+
+    full_load_file = str(pathlib.Path('/') / full_load_file.relative_to('/dbfs'))
     df = spark.read.parquet(full_load_file)
     patient_cols = ['_id', 'numOfRetries', 'status']
     df = (
-        df.withColumn('doc', F.from_json(df._doc, schema=schema))
+        df.withColumn('doc', F.from_json(df._doc, schema=ehrpatientreport_schema))
         .withColumnRenamed('_id', '_orig_id').drop('_doc').select('_orig_id', 'transact_seq', 'transact_change_timestamp', 'doc.*')
         .withColumn('patients', F.explode_outer('patients'))
         .select('*', *[F.col(f'patients.{col}').alias(f'patient_{col}') for col in patient_cols])
@@ -171,14 +170,19 @@ def initial_load_ehrpatientreport(DATABASE, table_name, delta_path):
     #df.printSchema()
     df.write.option("overwriteSchema", "true").format("delta").save(delta_path)
     spark.sql(f"CREATE TABLE IF NOT EXISTS {DATABASE}.{table_name} USING DELTA LOCATION '{delta_path}'")
+    print(f'created table {DATABASE!r}.{table_name!r}')
     
-    
-DATABASE = 'qa_mongo_ehrone_prime_bronze_EHRPatientReport'
-table_name = 'ehrpatientreport'
-delta_path = f'/delta/qa-dms-cdc-{DATABASE}/{table_name}'
+
+table_name = 'ehrpatientreport_ehrprime'
+delta_path = os.path.join(DELTA_BASE, table_name)
 
 initial_load_ehrpatientreport(DATABASE, table_name, delta_path)
-# select * from qa_mongo_ehrone_prime_bronze_EHRPatientReport.ehrpatientreport;
+# select * from raw.ehrpatientreport_ehrprime;
+
+# COMMAND ----------
+
+# MAGIC %sql
+# MAGIC select * from raw.ehrpatientreport_ehrprime;
 
 # COMMAND ----------
 
@@ -192,7 +196,7 @@ ehrpatientreport_schema = 'STRUCT<_class: STRING, _id: STRING, completedDate: ST
 
 
 def incremental_load_ehrpatientreport(DATABASE, table_name):
-    path = LOAD_PATH / table_name
+    path = LOAD_PATH / table_name[:-len('_ehrprime')]
     incremental_files = [str(pathlib.Path('/') / p.relative_to('/dbfs')) for p in path.glob('*.parquet') if not p.name.startswith('LOAD')]
     
     print('ehrpatientreport path', path, len(incremental_files))
@@ -257,9 +261,7 @@ def incremental_load_ehrpatientreport(DATABASE, table_name):
     )
     
 
-DATABASE = 'qa_mongo_ehrone_prime_bronze_EHRPatientReport'
-table_name = 'ehrpatientreport'
-delta_path = f'/delta/qa-dms-cdc-{DATABASE}/{table_name}'
+table_name = 'ehrpatientreport_ehrprime'
 
 incremental_load_ehrpatientreport(DATABASE, table_name)
 
@@ -274,7 +276,7 @@ uploadedpatientreport_schema = 'STRUCT<_class: STRING, _id: STRING, ehr: STRING,
 
 
 def initial_load_uploadedpatientreport(DATABASE, table_name, delta_path):
-    path = LOAD_PATH / table_name
+    path = LOAD_PATH / table_name[:-len('_ehrprime')]
     print('uploadedpatientreport path', path)
     # create table if not exists
     if table_exists(DATABASE, table_name):
@@ -283,10 +285,12 @@ def initial_load_uploadedpatientreport(DATABASE, table_name, delta_path):
     # since we are using same path for full load and incremental load
     # we will use `LOAD` to distingush between the two for now
     # we'll get the first `LOAD*.parquet` file, and there should only be one
-    full_load_file = str( next((pathlib.Path('/') / path.relative_to('/dbfs')).glob('LOAD*.parquet'), '') )
+    full_load_file = next(path.glob('LOAD*.parquet'), '')
     if not full_load_file:
+        print(f'{full_load_file!r} is not found')
         return None # no initial file, which would be weird and never happen for our workflow
-    
+
+    full_load_file = str(pathlib.Path('/') / full_load_file.relative_to('/dbfs'))
     df = spark.read.parquet(full_load_file)
     
     file_cols = ['fileName', 'inputType']
@@ -301,14 +305,15 @@ def initial_load_uploadedpatientreport(DATABASE, table_name, delta_path):
     #df.printSchema()
     df.write.option("overwriteSchema", "true").format("delta").save(delta_path)
     spark.sql(f"CREATE TABLE IF NOT EXISTS {DATABASE}.{table_name} USING DELTA LOCATION '{delta_path}'")
-    
-DATABASE = 'qa_mongo_ehrone_prime_bronze_EHRPatientReport'
-table_name = 'uploadedpatientreport'
-delta_path = f'/delta/qa-dms-cdc-{DATABASE}/{table_name}'
+    print(f'created table {DATABASE!r}.{table_name!r}')
+
+
+table_name = 'uploadedpatientreport_ehrprime'
+delta_path = os.path.join(DELTA_BASE, table_name)
 
 
 initial_load_uploadedpatientreport(DATABASE, table_name, delta_path)
-# select * from qa_mongo_ehrone_prime_bronze_EHRPatientReport.uploadedpatientreport;
+# select * from raw.uploadedpatientreport;
 
 # COMMAND ----------
 
@@ -318,7 +323,7 @@ initial_load_uploadedpatientreport(DATABASE, table_name, delta_path)
 # COMMAND ----------
 
 def incremental_load_uploadedpatientreport(DATABASE, table_name):
-    path = LOAD_PATH / table_name
+    path = LOAD_PATH / table_name[:-len('_ehrprime')]
     incremental_files = [str(pathlib.Path('/') / p.relative_to('/dbfs')) for p in path.glob('*.parquet') if not p.name.startswith('LOAD')]
     
     print('uploadedpatientreport path', path, len(incremental_files))
@@ -376,13 +381,10 @@ def incremental_load_uploadedpatientreport(DATABASE, table_name):
 # there seems to be a change in the schema of initial load and incremental files for this particular collection in the mongodb
 uploadedpatientreport_change_schema = 'STRUCT<_class: STRING, _id: STRING, automatedStatus: STRING, dobFormat: STRING, ehr: STRING, fileName: STRING, fromDate: STRUCT<`$date`: BIGINT>, inputType: STRING, isLocked: BOOLEAN, isQueued: BOOLEAN, isSingleThreaded: BOOLEAN, location: STRING, message: STRING, npi: STRING, physician: STRING, physicianSpecialty: STRING, practice: STRING, practiceId: STRING, priority: STRING, study: STRING, toDate: STRUCT<`$date`: BIGINT>, type: STRING, uploadId: STRING, uploadStatus: STRING, uploadTime: STRUCT<`$date`: BIGINT>>'
 
-
-DATABASE = 'qa_mongo_ehrone_prime_bronze_EHRPatientReport'
-table_name = 'uploadedpatientreport'
-delta_path = f'/delta/qa-dms-cdc-{DATABASE}/{table_name}'
+table_name = 'uploadedpatientreport_ehrprime'
 
 incremental_load_uploadedpatientreport(DATABASE, table_name) # the initial and incremental load seems to have different structures. What to do ?
-# select * from qa_mongo_ehrone_prime_bronze_EHRPatientReport.uploadedpatientreport;
+# select * from raw.uploadedpatientreport;
 
 # COMMAND ----------
 
@@ -396,7 +398,7 @@ suspendedaccess_schema = 'STRUCT<_class: STRING, _id: STRUCT<`$oid`: STRING>, au
 
 
 def initial_load_suspendedaccess(DATABASE, table_name, delta_path):
-    path = LOAD_PATH / table_name
+    path = LOAD_PATH / table_name[:-len('_ehrprime')]
     print('suspendedaccess path', path)
     # create table if not exists
     if table_exists(DATABASE, table_name):
@@ -405,10 +407,12 @@ def initial_load_suspendedaccess(DATABASE, table_name, delta_path):
     # since we are using same path for full load and incremental load
     # we will use `LOAD` to distingush between the two for now
     # we'll get the first `LOAD*.parquet` file, and there should only be one
-    full_load_file = str( next((pathlib.Path('/') / path.relative_to('/dbfs')).glob('LOAD*.parquet'), '') )
+    full_load_file = next(path.glob('LOAD*.parquet'), '')
     if not full_load_file:
+        print(f'{full_load_file!r} is not found')
         return None # no initial file, which would be weird and never happen for our workflow
-    
+
+    full_load_file = str(pathlib.Path('/') / full_load_file.relative_to('/dbfs'))
     df = spark.read.parquet(full_load_file)
     
     audit_cols = ['audit', 'date', 'newValue', 'originalValue', 'reportId', 'user']
@@ -425,10 +429,12 @@ def initial_load_suspendedaccess(DATABASE, table_name, delta_path):
     delta_path = f'/delta/qa-dms-cdc-{DATABASE}/{table_name}'
     df.write.option("overwriteSchema", "true").format("delta").save(delta_path)
     spark.sql(f"CREATE TABLE IF NOT EXISTS {DATABASE}.{table_name} USING DELTA LOCATION '{delta_path}'")
+    print(f'created table {DATABASE!r}.{table_name!r}')
     
-DATABASE = 'qa_mongo_ehrone_prime_bronze_EHRPatientReport'
-table_name = 'suspendedaccess'
-delta_path = f'/delta/qa-dms-cdc-{DATABASE}/{table_name}'
+
+table_name = 'suspendedaccess_ehrprime'
+delta_path = os.path.join(DELTA_BASE, table_name)
+
 
 initial_load_suspendedaccess(DATABASE, table_name, delta_path)
 
@@ -440,7 +446,7 @@ initial_load_suspendedaccess(DATABASE, table_name, delta_path)
 # COMMAND ----------
 
 def incremental_load_suspendedaccess(DATABASE, table_name):
-    path = LOAD_PATH / table_name
+    path = LOAD_PATH / table_name[:-len('_ehrprime')]
     print('suspendedaccess path', path)
     incremental_files = [str(pathlib.Path('/') / p.relative_to('/dbfs')) for p in path.glob('*.parquet') if not p.name.startswith('LOAD')]
     
@@ -494,10 +500,8 @@ def incremental_load_suspendedaccess(DATABASE, table_name):
     
 
 suspendedaccess_schema = 'STRUCT<_class: STRING, _id: STRUCT<`$oid`: STRING>, audit: ARRAY<STRUCT<audit: STRING, date: STRUCT<`$date`: BIGINT>, newValue: STRING, originalValue: STRING, reportId: STRING, user: STRING>>, ehr: STRING, isSuspended: BOOLEAN, practice: STRING, practiceId: STRING>'
-    
-DATABASE = 'qa_mongo_ehrone_prime_bronze_EHRPatientReport'
-table_name = 'suspendedaccess'
-delta_path = f'/delta/qa-dms-cdc-{DATABASE}/{table_name}'
+
+table_name = 'suspendedaccess_ehrprime'
 
 incremental_load_suspendedaccess(DATABASE, table_name) # the initial and incremental load seems to have different structures. What to do ?
 
@@ -512,7 +516,7 @@ eHROutputError_schema = 'STRUCT<_class: STRING, _id: STRUCT<`$oid`: STRING>, err
 
 
 def initial_load_eHROutputError(DATABASE, table_name, delta_path):
-    path = LOAD_PATH / table_name
+    path = LOAD_PATH / table_name[:-len('_ehrprime')]
     print('eHROutputError_path', path)
     # create table if not exists
     if table_exists(DATABASE, table_name):
@@ -521,10 +525,12 @@ def initial_load_eHROutputError(DATABASE, table_name, delta_path):
     # since we are using same path for full load and incremental load
     # we will use `LOAD` to distingush between the two for now
     # we'll get the first `LOAD*.parquet` file, and there should only be one
-    full_load_file = str( next((pathlib.Path('/') / path.relative_to('/dbfs')).glob('LOAD*.parquet'), '') )
+    full_load_file = next(path.glob('LOAD*.parquet'), '')
     if not full_load_file:
+        print(f'{full_load_file!r} is not found')
         return None # no initial file, which would be weird and never happen for our workflow
-    
+
+    full_load_file = str(pathlib.Path('/') / full_load_file.relative_to('/dbfs'))
     df = spark.read.parquet(full_load_file)
     df = (
         df.withColumn('doc', F.from_json(df._doc, schema=eHROutputError_schema))
@@ -535,12 +541,14 @@ def initial_load_eHROutputError(DATABASE, table_name, delta_path):
 
     df.write.option("overwriteSchema", "true").format("delta").save(delta_path)
     spark.sql(f"CREATE TABLE IF NOT EXISTS {DATABASE}.{table_name} USING DELTA LOCATION '{delta_path}'")
-    
-DATABASE = 'qa_mongo_ehrone_prime_bronze_EHRPatientReport'
-table_name = 'eHROutputError'
-delta_path = f'/delta/qa-dms-cdc-{DATABASE}/{table_name}'
+    print(f'created table {DATABASE!r}.{table_name!r}')
+
+
+table_name = 'eHROutputError_ehrprime'
+delta_path = os.path.join(DELTA_BASE, table_name)
+
 initial_load_eHROutputError(DATABASE, table_name, delta_path)
-# select * from qa_mongo_ehrone_prime_bronze_EHRPatientReport.eHROutputError;
+# select * from raw.eHROutputError;
 
 # COMMAND ----------
 
@@ -550,7 +558,7 @@ initial_load_eHROutputError(DATABASE, table_name, delta_path)
 # COMMAND ----------
 
 def incremental_load_eHROutputError(DATABASE, table_name):
-    path = LOAD_PATH / table_name
+    path = LOAD_PATH / table_name[:-len('_ehrprime')]
     print('eHROutputError_path', path)
     incremental_files = [str(pathlib.Path('/') / p.relative_to('/dbfs')) for p in path.glob('*.parquet') if not p.name.startswith('LOAD')]
     if len(incremental_files) == 0:
@@ -592,9 +600,7 @@ def incremental_load_eHROutputError(DATABASE, table_name):
 
 eHROutputError_schema = 'STRUCT<_class: STRING, _id: STRUCT<`$oid`: STRING>, errorDate: STRUCT<`$date`: BIGINT>, errorMessage: STRING, fileName: STRING>'
 
-DATABASE = 'qa_mongo_ehrone_prime_bronze_EHRPatientReport'
-table_name = 'eHROutputError'
-delta_path = f'/delta/qa-dms-cdc-{DATABASE}/{table_name}'
+table_name = 'eHROutputError_ehrprime'
 
 incremental_load_eHROutputError(DATABASE, table_name) # the initial and incremental load seems to have different structures. What to do ?
 
@@ -605,16 +611,11 @@ move_and_clear_processed_data(processing, processed)
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC select * from qa_mongo_ehrone_prime_bronze_EHRPatientReport.eHROutputError limit 5;
+# MAGIC select * from raw.eHROutputError limit 5;
 
 # COMMAND ----------
 
 1/0
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC # organize, clean up and schedule staging
 
 # COMMAND ----------
 
