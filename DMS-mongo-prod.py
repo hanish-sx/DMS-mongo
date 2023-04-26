@@ -45,7 +45,8 @@ from delta.tables import DeltaTable
 def table_exists(DATABASE, table_name):
     """Helper function to check if table already exists in a database"""
     existing_tables = spark.catalog.listTables(DATABASE)
-    return any(t.name == table_name for t in  existing_tables)
+    # looks like delta live table names are case insensitive
+    return any(t.name == table_name.lower() for t in  existing_tables)
 
 # COMMAND ----------
 
@@ -69,7 +70,11 @@ def move_files(src, dst):
         p.mkdir(parents=True, exist_ok=True)
         for file in dir.iterdir():
             print(f'Moving {file!r} to {p!r}')
-            shutil.move(str(file), str(p))
+            try:
+                shutil.move(str(file), str(p))
+            except shutil.Error:
+                # file already exists for some reason
+                file.unlink(missing_ok=True)
 
             
 def prepare_files_for_processing(BASE_PATH, processing):
@@ -98,6 +103,7 @@ def move_and_clear_processed_data(processing, processed):
             # dir exists, try moving each files instead
             move_files(dir, processed / dir.name)
 
+# COMMAND ----------
 
 prepare_files_for_processing(BASE_PATH, processing)
 
@@ -127,7 +133,7 @@ LOAD_PATH, DELTA_BASE
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC select * from raw.ehrpatientreport order by uploadTime desc limit 1;
+# MAGIC select * from raw.ehrpatientreport_ehrprime order by uploadTime desc limit 1;
 
 # COMMAND ----------
 
@@ -425,8 +431,6 @@ def initial_load_suspendedaccess(DATABASE, table_name, delta_path):
     )
     display(df)
     #df.printSchema()
-    
-    delta_path = f'/delta/qa-dms-cdc-{DATABASE}/{table_name}'
     df.write.option("overwriteSchema", "true").format("delta").save(delta_path)
     spark.sql(f"CREATE TABLE IF NOT EXISTS {DATABASE}.{table_name} USING DELTA LOCATION '{delta_path}'")
     print(f'created table {DATABASE!r}.{table_name!r}')
@@ -548,7 +552,7 @@ table_name = 'eHROutputError_ehrprime'
 delta_path = os.path.join(DELTA_BASE, table_name)
 
 initial_load_eHROutputError(DATABASE, table_name, delta_path)
-# select * from raw.eHROutputError;
+# select * from raw.eHROutputError_ehrprime;
 
 # COMMAND ----------
 
@@ -611,11 +615,7 @@ move_and_clear_processed_data(processing, processed)
 # COMMAND ----------
 
 # MAGIC %sql
-# MAGIC select * from raw.eHROutputError limit 5;
-
-# COMMAND ----------
-
-1/0
+# MAGIC select * from raw.eHROutputError_ehrprime limit 5;
 
 # COMMAND ----------
 
