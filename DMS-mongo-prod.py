@@ -17,17 +17,19 @@ from delta.tables import DeltaTable
 
 # MAGIC %sh
 # MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/EHRPatientReport/ehrpatientreport
-# MAGIC 
+# MAGIC
 # MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/EHRPatientReport/uploadedpatientreport/
-# MAGIC 
-# MAGIC 
+# MAGIC
+# MAGIC
 # MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/EHRPatientReport/suspendedaccess/
-# MAGIC 
-# MAGIC 
+# MAGIC
+# MAGIC
 # MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/EHRPatientReport/eHROutputError
-# MAGIC 
-# MAGIC 
-# MAGIC ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/EHRPatientReport/
+# MAGIC
+# MAGIC
+# MAGIC # ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/EHRPatientReport/
+# MAGIC
+# MAGIC ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/
 
 # COMMAND ----------
 
@@ -114,8 +116,8 @@ prepare_files_for_processing(BASE_PATH, processing)
 # MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/
 # MAGIC #ls /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processed/2023-04-17/EHRPatientReport/ehrpatientreport | wc -l
 # MAGIC # ls -la /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/processing/EHRPatientReport/*
-# MAGIC 
-# MAGIC 
+# MAGIC
+# MAGIC
 # MAGIC ls -la /dbfs/mnt/prod-ehrone-postgres-migration/ehrone_prod/ehrprime-prod-delta/
 
 # COMMAND ----------
@@ -142,7 +144,7 @@ LOAD_PATH, DELTA_BASE
 
 # COMMAND ----------
 
-ehrpatientreport_schema = 'STRUCT<_class: STRING, _id: STRING, completedDate: STRUCT<`$date`: BIGINT>, ehr: STRING, fromDate: STRUCT<`$date`: BIGINT>, location: STRING, message: STRING, npi: STRING, numOfRetries: BIGINT, orginalReportId: STRING, patients: ARRAY<STRUCT<_id: STRING, numOfRetries: BIGINT, status: STRING>>, physician: STRING, practice: STRING, priority: STRING, sentToRPATime: STRUCT<`$date`: BIGINT>, singleThreaded: BOOLEAN, status: STRING, study: STRING, toDate: STRUCT<`$date`: BIGINT>, type: STRING, uploadTime: STRUCT<`$date`: BIGINT>>'
+ehrpatientreport_schema = 'STRUCT<_class: STRING, _id: STRING, completedDate: STRUCT<`$date`: BIGINT>, ehr: STRING, fromDate: STRUCT<`$date`: BIGINT>, location: STRING, message: STRING, npi: STRING, numOfRetries: BIGINT, orginalReportId: STRING, patients: ARRAY<STRUCT<_id: STRING, numOfRetries: BIGINT, status: STRING>>, physician: STRING, practice: STRING, priority: STRING, sentToRPATime: STRUCT<`$date`: BIGINT>, singleThreaded: BOOLEAN, status: STRING, study: STRING, toDate: STRUCT<`$date`: BIGINT>, type: STRING, uploadTime: STRUCT<`$date`: BIGINT>, practiceId: BIGINT, completedTime: STRUCT<`$date`: BIGINT>>>'
 
 
 def initial_load_ehrpatientreport(DATABASE, table_name, delta_path):
@@ -168,6 +170,7 @@ def initial_load_ehrpatientreport(DATABASE, table_name, delta_path):
     df = (
         df.withColumn('doc', F.from_json(df._doc, schema=ehrpatientreport_schema))
         .withColumnRenamed('_id', '_orig_id').drop('_doc').select('_orig_id', 'transact_seq', 'transact_change_timestamp', 'doc.*')
+        .withColumn('completedTime', F.col('completedTime.$date'))
         .withColumn('patients', F.explode_outer('patients'))
         .select('*', *[F.col(f'patients.{col}').alias(f'patient_{col}') for col in patient_cols])
         .drop('patients')
@@ -187,17 +190,12 @@ initial_load_ehrpatientreport(DATABASE, table_name, delta_path)
 
 # COMMAND ----------
 
-# MAGIC %sql
-# MAGIC select * from raw.ehrpatientreport_ehrprime;
-
-# COMMAND ----------
-
 # MAGIC %md
 # MAGIC # Incremental ehrpatientreport
 
 # COMMAND ----------
 
-ehrpatientreport_schema = 'STRUCT<_class: STRING, _id: STRING, completedDate: STRUCT<`$date`: BIGINT>, ehr: STRING, fromDate: STRUCT<`$date`: BIGINT>, location: STRING, message: STRING, npi: STRING, numOfRetries: BIGINT, orginalReportId: STRING, patients: ARRAY<STRUCT<_id: STRING, numOfRetries: BIGINT, status: STRING>>, physician: STRING, practice: STRING, priority: STRING, sentToRPATime: STRUCT<`$date`: BIGINT>, singleThreaded: BOOLEAN, status: STRING, study: STRING, toDate: STRUCT<`$date`: BIGINT>, type: STRING, uploadTime: STRUCT<`$date`: BIGINT>>'
+ehrpatientreport_schema = 'STRUCT<_class: STRING, _id: STRING, completedDate: STRUCT<`$date`: BIGINT>, ehr: STRING, fromDate: STRUCT<`$date`: BIGINT>, location: STRING, message: STRING, npi: STRING, numOfRetries: BIGINT, orginalReportId: STRING, patients: ARRAY<STRUCT<_id: STRING, numOfRetries: BIGINT, status: STRING>>, physician: STRING, practice: STRING, priority: STRING, sentToRPATime: STRUCT<`$date`: BIGINT>, singleThreaded: BOOLEAN, status: STRING, study: STRING, toDate: STRUCT<`$date`: BIGINT>, type: STRING, uploadTime: STRUCT<`$date`: BIGINT>, practiceId: BIGINT, completedTime: STRUCT<`$date`: BIGINT>>'
 
 
 
@@ -219,6 +217,7 @@ def incremental_load_ehrpatientreport(DATABASE, table_name):
     changes_uniq_df = (
         changes_uniq_df.withColumn('doc', F.from_json(changes_uniq_df._doc, schema=ehrpatientreport_schema))
         .withColumnRenamed('_id', '_orig_id').drop('_doc').select('Op', '_orig_id', 'transact_seq', 'transact_change_timestamp', 'doc.*')
+        .withColumn('completedTime', F.col('completedTime.$date'))
         .withColumn('patients', F.explode_outer('patients'))
         .select('*', *[F.col(f'patients.{col}').alias(f'patient_{col}') for col in patient_cols])
         .drop('patients')
@@ -252,7 +251,9 @@ def incremental_load_ehrpatientreport(DATABASE, table_name):
         "uploadTime": "source.uploadTime",
         "patient__id": "source.patient__id",
         "patient_numOfRetries": "source.patient_numOfRetries",
-        "patient_status": "source.patient_status"
+        "patient_status": "source.patient_status",
+        "practiceId": "source.practiceId",
+        "completedTime": "source.completedTime",
     }
 
     (
@@ -270,6 +271,99 @@ def incremental_load_ehrpatientreport(DATABASE, table_name):
 table_name = 'ehrpatientreport_ehrprime'
 
 incremental_load_ehrpatientreport(DATABASE, table_name)
+
+# COMMAND ----------
+
+# %sql
+# -- ALTER table raw.ehrpatientreport_ehrprime ADD COLUMNS (practiceId BIGINT, completedTime BIGINT);
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC # Hash table for EHR ID mapping
+
+# COMMAND ----------
+
+# import pyspark.sql.functions as F
+
+# from api import get_ehrid
+
+# @F.udf(returnType='string')
+# def get_ehr_id_udf(data):
+#     report_id = data.id
+#     patient_id = data.patient_id
+#     return get_ehrid(report_id, patient_id)
+
+
+# def initial_load_ehrpatientreport_mapping():
+#     src_table_name = 'ehrpatientreport_ehrprime'
+#     table_name = 'ehrpatientreport_ehrprime_mapping'
+#     if table_exists(DATABASE, table_name):
+#         print(f'{table_name!r} already exists in database {DATABASE!r}')
+#         return None # Nothing to do
+#     # spark.sql(f"CREATE TABLE IF NOT EXISTS {DATABASE}.{table_name} AS SELECT _id as id, patient__id as patient_id, cast(null as string) as hashed_ehr_id from {DATABASE}.{src_table_name}")
+#     (
+#         spark.sql(f"SELECT _id as id, patient__id as patient_id from {DATABASE}.{src_table_name}")
+#         .withColumn('ehr_id_hash', F.sha2(get_ehr_id_udf(F.struct('id', 'patient_id')), 256))
+#         # .withColumn('ehr_id_hash', F.when(F.col('ehr_id_hash').isNotNull(), F.sha2('ehr_id_hash', 256)).otherwise(F.col('ehr_id_hash')))\ 
+#         .write.format('delta').saveAsTable(f'{DATABASE}.{table_name}')
+#     )
+#     print(f'created table {DATABASE!r}.{table_name!r}')
+
+
+# def incremental_load_ehrpatientreport_mapping(DATABASE, table_name, target_table_name):
+#     path = LOAD_PATH / table_name[:-len('_ehrprime')]
+#     incremental_files = [str(pathlib.Path('/') / p.relative_to('/dbfs')) for p in path.glob('*.parquet') if not p.name.startswith('LOAD')]
+    
+#     print('ehrpatientreport path', path, len(incremental_files))
+#     if len(incremental_files) == 0:
+#         return None # no incremental files found
+#     primary_key = '_id'
+#     secondary_key = 'patient__id'
+#     changes_df = spark.read.parquet(*incremental_files)
+#     inner_df = changes_df.groupBy(primary_key).agg(F.max('transact_seq').alias('max_seq'))
+#     changes_uniq_df = changes_df.join(inner_df, (changes_df[primary_key] == inner_df[primary_key]) & (changes_df.transact_seq == inner_df.max_seq), 'inner').drop(changes_df[primary_key])
+
+
+#     patient_cols = ['_id', 'numOfRetries', 'status']
+#     changes_uniq_df = (
+#         changes_uniq_df.withColumn('doc', F.from_json(changes_uniq_df._doc, schema=ehrpatientreport_schema))
+#         .withColumnRenamed('_id', '_orig_id').drop('_doc').select('Op', '_orig_id', 'transact_seq', 'transact_change_timestamp', 'doc.*')
+#         .withColumn('patients', F.explode_outer('patients'))
+#         .select('*', *[F.col(f'patients.{col}').alias(f'patient_{col}') for col in patient_cols])
+#         .drop('patients')
+#     ).withColumn('ehr_id_hash', F.sha2(get_ehr_id_udf(F.struct('_id', 'patient__id')), 256))
+
+#     display(changes_uniq_df)
+#     mapping = {
+#         "id": "source._id",
+#         "patient_id": "source.patient__id",
+#         "ehr_id_hash": "sha2(source.ehr_id_hash, 256)"
+#     }
+
+#     (
+#          DeltaTable.forName(spark, f'{DATABASE}.{target_table_name}').alias("target")
+#              .merge(changes_uniq_df.alias("source"), f"source.{primary_key} = target.id and source.{secondary_key} = target.patient_id")
+#              # # this will work, if there exists a record with the id, which should be there. This may be confusing, when it apprears on the original table, 
+#              # when you delete the delta changes and do a fresh run again. Because the Insert is removed, and you start with a new delete of the older data in original table
+#              .whenMatchedDelete("source.Op = 'D'")
+#              .whenMatchedUpdate(set=mapping)
+#              .whenNotMatchedInsert(values=mapping)
+#              .execute()
+#     )
+
+# src_table_name = 'ehrpatientreport_ehrprime'
+# target_table_name = 'ehrpatientreport_ehrprime_mapping'
+
+# # initial_load_ehrpatientreport_mapping() # so that it won't run in tomorrows scheduled run
+# # incremental_load_ehrpatientreport_mapping(DATABASE, src_table_name, target_table_name) # only run when the API access is ready
+# Uncomment when API is ready.
+
+# COMMAND ----------
+
+# %sql
+# -- select * from raw.ehrpatientreport_ehrprime_mapping;
+# -- drop table raw.ehrpatientreport_ehrprime_mapping;
 
 # COMMAND ----------
 
@@ -457,7 +551,7 @@ def incremental_load_suspendedaccess(DATABASE, table_name):
     if len(incremental_files) == 0:
         return # Nothing to do
     primary_key = '_id'
-    secondary_key = 'audit' # what if there will two audit with same _id ?
+    secondary_key = 'audit.reportId' # what if there will two audit with same _id ?
     changes_df = spark.read.parquet(*incremental_files)
     inner_df = changes_df.groupBy(primary_key).agg(F.max('transact_seq').alias('max_seq'))
     changes_uniq_df = changes_df.join(inner_df, (changes_df[primary_key] == inner_df[primary_key]) & (changes_df.transact_seq == inner_df.max_seq), 'inner').drop(changes_df[primary_key])
@@ -483,17 +577,17 @@ def incremental_load_suspendedaccess(DATABASE, table_name):
         "isSuspended": "source.isSuspended",
         "practice": "source.practice",
         "practiceId": "source.practiceId",
-        "audit.audit": "source.audit.audit",
-        "audit.date": "source.audit.date",
-        "audit.newValue": "source.audit.newValue",
-        "audit.originalValue": "source.audit.originalValue",
-        "audit.reportId": "source.audit.reportId",
-        "audit.user": "source.audit.user"
+        "`audit.audit`": "source.`audit.audit`",
+        "`audit.date`": "source.`audit.date`",
+        "`audit.newValue`": "source.`audit.newValue`",
+        "`audit.originalValue`": "source.`audit.originalValue`",
+        "`audit.reportId`": "source.`audit.reportId`",
+        "`audit.user`": "source.`audit.user`"
     }
 
     (
          DeltaTable.forName(spark, f'{DATABASE}.{table_name}').alias("target")
-             .merge(changes_uniq_df.alias("source"), f"source.{primary_key} = target.{primary_key} and source.{secondary_key} = target.{secondary_key}")
+             .merge(changes_uniq_df.alias("source"), f"source.{primary_key} = target.{primary_key} and source.`{secondary_key}` = target.`{secondary_key}`")
              # # this will work, if there exists a record with the id, which should be there. This may be confusing, when it apprears on the original table, 
              # when you delete the delta changes and do a fresh run again. Because the Insert is removed, and you start with a new delete of the older data in original table
              .whenMatchedDelete("source.Op = 'D'")
